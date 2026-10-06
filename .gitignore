@@ -1,0 +1,20 @@
+# Node
+node_modules
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache
+.venv/
+
+# Terraform
+.terraform
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+.terraform.tfstate.lock.info
+
+# Secrets
+credentials
+.env
+*.pem
