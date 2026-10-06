@@ -1,0 +1,124 @@
+# =============================================================
+# Backend CD — Build, Push & Deploy
+#
+# Triggered when backend code lands on main, or manually.
+# Repeats the same lint/test checks from the CI pipeline,
+# then builds a Docker image tagged with the commit SHA,
+# pushes it to ECR, and deploys to EKS via kustomize.
+# =============================================================
+
+name: "CD: Backend Deploy"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/backend/**"
+
+env:
+  PY_VER: "3.10"
+  APP_ROOT: starter/backend
+  AWS_REGION: us-east-1
+  ECR_REPO: backend
+  EKS_CLUSTER: cluster
+
+jobs:
+
+  # -- Quality checks (same as CI) --
+
+  lint:
+    name: "Lint (flake8)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Python ${{ env.PY_VER }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VER }}
+
+      - name: Set up pipenv and install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install pipenv
+          pipenv install --dev
+
+      - name: Cache the virtual environment
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/virtualenvs
+          key: backend-venv-${{ hashFiles('starter/backend/Pipfile.lock') }}
+
+      - name: Enforce flake8 style rules
+        run: pipenv run lint
+
+  test:
+    name: "Test (pytest)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Python ${{ env.PY_VER }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VER }}
+
+      - name: Set up pipenv and install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install pipenv
+          pipenv install --dev
+
+      - name: Cache the virtual environment
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/virtualenvs
+          key: backend-venv-${{ hashFiles('starter/backend/Pipfile.lock') }}
+
+      - name: Execute pytest
+        run: pipenv run test
+
+  # -- Container image --
+
+  image:
+    name: "Build & Push to ECR"
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    outputs:
+      full_image_tag: ${{ steps.docker.outputs.full_image_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate with AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the backend image
+        id: docker
+        working-directory: starter/backend
+        run: |
+          IMAGE="${{ steps.ecr_login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}"
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
+          echo "full_image_tag=${IMAGE}" >> "$GITHUB_OUTPUT"
