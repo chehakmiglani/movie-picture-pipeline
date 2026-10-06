@@ -54,9 +54,7 @@ All AWS credentials are stored as GitHub repository secrets — nothing is hardc
 
 | # | Filename | Description |
 |---|----------|-------------|
-| 1 | `01-frontend-movie-list.jpeg` | Frontend rendering movie data from the backend |
-| 2 | `02-backend-movies-json.jpeg` | Raw JSON from the `/movies` API endpoint |
-| 3 | `03-all-workflows-green.png` | All four workflows showing successful runs |
-| 4 | `04-ecr-backend-image.jpeg` | Backend image in ECR with commit SHA tag |
-| 5 | `05-ecr-frontend-image.jpeg` | Frontend image in ECR with commit SHA tag |
-| 6 | `06-failing-test-blocks-build.jpeg` | Broken test correctly preventing the build job |
+| 1 | `frontent-list-movie.png` | Frontend rendering movie data from the backend |
+| 2 | `backend-list-movie.png` | Raw JSON from the `/movies` API endpoint |
+| 3 | `all-workflow-green.png` | All four workflows showing successful runs |
+| 4 | `ecr-frontent-backend.png` | ECR repositories with frontend and backend images |
