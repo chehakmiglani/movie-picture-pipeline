@@ -1,0 +1,190 @@
+# =============================================================
+# Frontend CD — Build, Push & Deploy
+#
+# Triggered when frontend code lands on main, or manually.
+# After passing the same lint/test gates as the CI pipeline,
+# this workflow builds a Docker image, tags it with the
+# commit SHA, pushes it to ECR, and rolls it out to EKS.
+#
+# Before building, it looks up the backend service URL
+# from the cluster so React knows where to send API calls.
+# =============================================================
+
+name: "CD: Frontend Deploy"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "starter/frontend/**"
+
+env:
+  NODE_VER: "18"
+  APP_ROOT: starter/frontend
+  AWS_REGION: us-east-1
+  ECR_REPO: frontend
+  EKS_CLUSTER: cluster
+
+jobs:
+
+  # ── Quality checks (same as CI) ────────────────────────────
+
+  lint:
+    name: "Lint (ESLint)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Node.js ${{ env.NODE_VER }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VER }}
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+
+      - name: Install dependencies from lockfile
+        run: npm ci
+
+      - name: Enforce ESLint rules
+        run: npm run lint
+
+  test:
+    name: "Test (Jest)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: starter/frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Node.js ${{ env.NODE_VER }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VER }}
+          cache: npm
+          cache-dependency-path: starter/frontend/package-lock.json
+
+      - name: Install dependencies from lockfile
+        run: npm ci
+
+      - name: Run the Jest test suite
+        run: CI=true npm test
+
+  # ── Container image ────────────────────────────────────────
+
+  image:
+    name: "Build & Push to ECR"
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    outputs:
+      full_image_tag: ${{ steps.docker.outputs.full_image_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate with AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up kubectl
+        run: |
+          curl -sLO "https://dl.k8s.io/release/v1.28.4/bin/linux/amd64/kubectl"
+          sudo install kubectl /usr/local/bin/kubectl
+
+      - name: Fetch backend service URL from the cluster
+        id: backend_svc
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER }} \
+            --region ${{ env.AWS_REGION }}
+
+          BE_HOSTNAME=$(kubectl get svc backend \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+
+          if [ -z "$BE_HOSTNAME" ]; then
+            echo "::error::Backend service hostname not found — deploy backend first."
+            exit 1
+          fi
+          echo "api_url=http://${BE_HOSTNAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push the frontend image
+        id: docker
+        working-directory: starter/frontend
+        run: |
+          IMAGE="${{ steps.ecr_login.outputs.registry }}/${{ env.ECR_REPO }}:${{ github.sha }}"
+          docker build \
+            --build-arg REACT_APP_MOVIE_API_URL=${{ steps.backend_svc.outputs.api_url }} \
+            --tag "$IMAGE" .
+          docker push "$IMAGE"
+          echo "full_image_tag=${IMAGE}" >> "$GITHUB_OUTPUT"
+
+  # ── Kubernetes rollout ─────────────────────────────────────
+
+  deploy:
+    name: "Deploy to EKS"
+    needs: image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate with AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up kubectl and kustomize
+        run: |
+          curl -sLO "https://dl.k8s.io/release/v1.28.4/bin/linux/amd64/kubectl"
+          sudo install kubectl /usr/local/bin/kubectl
+          curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+          sudo install kustomize /usr/local/bin/kustomize
+
+      - name: Connect to the EKS cluster
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Apply updated manifests with new image tag
+        working-directory: starter/frontend/k8s
+        run: |
+          kustomize edit set image frontend=${{ needs.image.outputs.full_image_tag }}
+          kustomize build | kubectl apply -f -
+
+      - name: Verify Kubernetes deployment
+        run: |
+          kubectl rollout status deployment/frontend --timeout=180s || true
+          echo "----- Logging - kubectl get all ---- "
+          kubectl get all
+          echo "----- Logging - kubectl describe deploy ----- "
+          kubectl describe deploy frontend
+
+      - name: Verify Frontend ECR image
+        run: |
+          echo "----- Logging - Frontend ECR Image Details ----- "
+          AWS_PAGER="" aws ecr describe-images \
+            --repository-name frontend \
+            --region us-east-1 \
+            --query 'sort_by(imageDetails,&imagePushedAt)[-1].{Tags:imageTags,Digest:imageDigest,PushedAt:imagePushedAt}' \
+            --output table
