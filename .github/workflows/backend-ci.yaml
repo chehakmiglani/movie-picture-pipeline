@@ -1,3 +1,12 @@
+# =============================================================
+# Backend CI — Pull Request Quality Checks
+#
+# Validates backend code on every PR to main.
+# flake8 (linting) and pytest run concurrently,
+# and a Docker build verifies the image compiles cleanly
+# only after both quality checks pass.
+# =============================================================
+
 name: "CI: Backend Quality Gates"
 
 on:
@@ -42,3 +51,49 @@ jobs:
 
       - name: Enforce flake8 style rules
         run: pipenv run lint
+
+  test:
+    name: "Test (pytest)"
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.APP_ROOT }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure Python ${{ env.PY_VER }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PY_VER }}
+
+      - name: Set up pipenv and install packages
+        run: |
+          python -m pip install --upgrade pip
+          pip install pipenv
+          pipenv install --dev
+
+      - name: Cache the virtual environment
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/virtualenvs
+          key: backend-venv-${{ hashFiles('starter/backend/Pipfile.lock') }}
+
+      - name: Execute pytest
+        run: pipenv run test
+
+  build:
+    name: "Build Docker Image"
+    needs:
+      - lint
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile backend Docker image (no push)
+        run: |
+          docker build \
+            --tag backend-ci:${{ github.sha }} \
+            ./${{ env.APP_ROOT }}
