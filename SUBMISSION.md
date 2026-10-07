@@ -1,60 +1,53 @@
-# Submission — Movie Picture Pipeline
+# Submission — Movie Picture CI/CD Pipelines
 
-## What I Built
+## Overview
 
-For this project, I set up four GitHub Actions pipelines that handle the full lifecycle of a two-part web app (React frontend + Flask backend). The goal was to go from code change → automated checks → container image → live deployment on Kubernetes, all without any manual steps once code lands on `main`.
+This project implements four GitHub Actions workflows that automate the full lifecycle of the Movie Picture application — a React frontend and Flask backend. The pipelines enforce code quality on every pull request and handle building, publishing, and deploying container images to an Amazon EKS cluster on every merge to main.
 
-## Pipeline Breakdown
+## Workflow Files
 
-### CI Pipelines (Pull Request Gates)
+| Filename | Workflow name | Trigger |
+|---|---|---|
+| `frontend-ci.yaml` | Frontend PR Pipeline | PRs to `main` affecting `starter/frontend/**`, plus manual |
+| `backend-ci.yaml` | Backend PR Pipeline | PRs to `main` affecting `starter/backend/**`, plus manual |
+| `frontend-cd.yaml` | Frontend Release Pipeline | Pushes to `main` affecting `starter/frontend/**`, plus manual |
+| `backend-cd.yaml` | Backend Release Pipeline | Pushes to `main` affecting `starter/backend/**`, plus manual |
 
-Each service has its own CI workflow that kicks in whenever a PR targets `main` and touches files under its directory. They can also be started by hand from the Actions tab.
+## Pipeline Structure
 
-- **Frontend CI** (`frontend-ci.yaml`): Spins up ESLint and Jest in parallel. If both are clean, a Docker build runs as a sanity check (nothing gets pushed anywhere).
-- **Backend CI** (`backend-ci.yaml`): Runs flake8 for style and pytest for correctness, again in parallel. Same idea — Docker build only happens after both pass.
+### CI (Pull Request) Pipelines
 
-The parallel setup saves a noticeable amount of time compared to running things one after another.
+Both CI pipelines follow the same pattern:
 
-### CD Pipelines (Deploy on Merge)
+1. **`code-lint`** and **`unit-tests`** execute concurrently — ESLint + Jest for the frontend, flake8 + pytest for the backend. Running them in parallel cuts total wait time.
+2. **`docker-verify`** only runs if both gates pass. It builds the Docker image locally without pushing, confirming the Dockerfile and application compile correctly.
 
-When code actually merges into `main`, the CD workflows take over. They repeat the same quality checks (because you can't trust that the PR checks ran against the final merged state), then go further:
+### CD (Release) Pipelines
 
-1. Build a Docker image tagged with the exact commit SHA
-2. Push it to the matching ECR repository
-3. Use kustomize to patch the Kubernetes manifests with the new image tag
-4. Apply the updated manifests to the EKS cluster via kubectl
+The CD pipelines extend the CI checks with two additional stages:
 
-The frontend CD has one extra step: before building the image, it queries the cluster to find the backend service's load balancer URL and passes it as `REACT_APP_MOVIE_API_URL` so the React app knows where to send API requests.
+3. **`container-publish`** — Builds the Docker image, tags it with the git commit SHA (`${{ github.sha }}`), and pushes it to the corresponding ECR repository. For the frontend, this step first queries the EKS cluster to discover the backend's LoadBalancer URL and injects it via the `REACT_APP_MOVIE_API_URL` build arg.
+4. **`k8s-release`** — Uses kustomize to patch the Kubernetes manifests with the newly pushed image URI, applies them to the EKS cluster, and waits for the rollout to succeed.
 
-## Secrets & Security
+Each CD pipeline ends with reviewer-requested verification steps that log `kubectl get all`, `kubectl describe deploy`, and the latest ECR image metadata.
 
-All AWS credentials are stored as GitHub repository secrets — nothing is hardcoded in the workflow files. The workflows reference three secrets:
+## Design Decisions
 
-| Secret | Purpose |
-|--------|---------|
-| `AWS_ACCESS_KEY_ID` | IAM access key for ECR/EKS operations |
-| `AWS_SECRET_ACCESS_KEY` | Corresponding secret key |
-| `AWS_SESSION_TOKEN` | Required for temporary/session-based credentials |
+- **Parallel quality gates**: Lint and tests have no `needs` dependency on each other, so they run simultaneously.
+- **Sequential gating**: The Docker build/push job declares `needs: [code-lint, unit-tests]`, preventing any image work if either check fails.
+- **Commit SHA tagging**: Every Docker image is tagged `<ecr-registry>/<repo>:<git-sha>`, creating a direct, auditable link between a deployed container and the exact source commit.
+- **Backend-first deployment order**: The frontend CD discovers the backend service URL during its build step, so the backend must be deployed before the frontend.
+- **Secrets management**: AWS credentials are stored in GitHub repository secrets — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_SESSION_TOKEN` — and are never hardcoded.
 
-## Infrastructure Stack
+## Infrastructure
 
-- **Container registry**: Amazon ECR (separate repos for `frontend` and `backend`)
-- **Orchestration**: Amazon EKS cluster in `us-east-1`
-- **Provisioning**: Terraform (configs live in `setup/terraform/`)
-- **Manifest management**: kustomize for patching image tags at deploy time
-
-## Architectural Decisions
-
-1. **Commit SHA as image tag** — Every deployed image maps directly to a Git commit, which makes rollbacks and debugging straightforward.
-2. **Gated builds** — Docker work is expensive, so I made it depend on lint+test passing first. No point building an image from broken code.
-3. **Separate CI and CD files** — Keeps the PR feedback loop fast (no AWS credentials needed) while the deploy pipeline handles the heavier lifting.
-4. **kustomize over manual sed** — Using `kustomize edit set image` is cleaner and less error-prone than string replacement in YAML files.
+| Resource | Details |
+|---|---|
+| Container Registry | Amazon ECR — two repos (`frontend`, `backend`) |
+| Orchestration | Amazon EKS cluster in `us-east-1` |
+| IaC | Terraform configs under `setup/terraform/` |
+| Manifest tooling | kustomize patches the image tag per deploy |
 
 ## Screenshots
 
-| # | Filename | Description |
-|---|----------|-------------|
-| 1 | `frontent-list-movie.png` | Frontend rendering movie data from the backend |
-| 2 | `backend-list-movie.png` | Raw JSON from the `/movies` API endpoint |
-| 3 | `all-workflow-green.png` | All four workflows showing successful runs |
-| 4 | `ecr-frontent-backend.png` | ECR repositories with frontend and backend images |
+Screenshots documenting successful workflow runs, ECR images, and the live application are in the `screenshots/` directory.

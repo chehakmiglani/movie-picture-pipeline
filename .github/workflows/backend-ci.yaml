@@ -1,99 +1,95 @@
-# =============================================================
-# Backend CI — Pull Request Quality Checks
-#
-# Validates backend code on every PR to main.
-# flake8 (linting) and pytest run concurrently,
-# and a Docker build verifies the image compiles cleanly
-# only after both quality checks pass.
-# =============================================================
+# ------------------------------------------------------------------
+# backend-ci.yaml
+# Runs on every PR that touches starter/backend/**, also manual.
+# Jobs: code-lint, unit-tests run concurrently → docker-verify gates on both.
+# ------------------------------------------------------------------
 
-name: "CI: Backend Quality Gates"
+name: Backend PR Pipeline
 
 on:
   workflow_dispatch:
   pull_request:
-    branches:
-      - main
+    branches: [main]
     paths:
       - "starter/backend/**"
 
 env:
-  PY_VER: "3.10"
-  APP_ROOT: starter/backend
+  SRC_DIR: starter/backend
+  PYTHON_VERSION: "3.10"
 
 jobs:
-  lint:
-    name: "Lint (flake8)"
+
+  code-lint:
+    name: Flake8 Analysis
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ${{ env.APP_ROOT }}
+        working-directory: starter/backend
     steps:
-      - name: Checkout repository
+      - name: Fetch repo
         uses: actions/checkout@v4
 
-      - name: Configure Python ${{ env.PY_VER }}
+      - name: Prepare Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PY_VER }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Set up pipenv and install packages
+      - name: Bootstrap pipenv
         run: |
           python -m pip install --upgrade pip
           pip install pipenv
           pipenv install --dev
 
-      - name: Cache the virtual environment
+      - name: Preserve virtualenv cache
         uses: actions/cache@v4
         with:
           path: ~/.local/share/virtualenvs
-          key: backend-venv-${{ hashFiles('starter/backend/Pipfile.lock') }}
+          key: py-deps-${{ hashFiles('starter/backend/Pipfile.lock') }}
 
-      - name: Enforce flake8 style rules
+      - name: Check code style
         run: pipenv run lint
 
-  test:
-    name: "Test (pytest)"
+  unit-tests:
+    name: Pytest Suite
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: ${{ env.APP_ROOT }}
+        working-directory: starter/backend
     steps:
-      - name: Checkout repository
+      - name: Fetch repo
         uses: actions/checkout@v4
 
-      - name: Configure Python ${{ env.PY_VER }}
+      - name: Prepare Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PY_VER }}
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Set up pipenv and install packages
+      - name: Bootstrap pipenv
         run: |
           python -m pip install --upgrade pip
           pip install pipenv
           pipenv install --dev
 
-      - name: Cache the virtual environment
+      - name: Preserve virtualenv cache
         uses: actions/cache@v4
         with:
           path: ~/.local/share/virtualenvs
-          key: backend-venv-${{ hashFiles('starter/backend/Pipfile.lock') }}
+          key: py-deps-${{ hashFiles('starter/backend/Pipfile.lock') }}
 
-      - name: Execute pytest
+      - name: Run test cases
         run: pipenv run test
 
-  build:
-    name: "Build Docker Image"
-    needs:
-      - lint
-      - test
+  docker-verify:
+    name: Docker Build Check
+    needs: [code-lint, unit-tests]
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Fetch repo
         uses: actions/checkout@v4
 
-      - name: Compile backend Docker image (no push)
+      - name: Attempt Docker build (no push)
         run: |
           docker build \
-            --tag backend-ci:${{ github.sha }} \
-            ./${{ env.APP_ROOT }}
+            --tag be-ci-verify:${{ github.sha }} \
+            ./${{ env.SRC_DIR }}
+          echo "Docker build passed for commit ${{ github.sha }}"
